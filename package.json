@@ -1,0 +1,21 @@
+{
+  "name": "native-split-groups",
+  "version": "0.2.1",
+  "description": "Obsidian plugin: split Bases groups by list items in the native views",
+  "main": "main.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit --skipLibCheck",
+    "build": "npm run typecheck && node esbuild.config.mjs",
+    "test": "esbuild test/split.test.ts test/drag.test.ts --bundle --platform=node --outdir=.tmp --out-extension:.js=.cjs && node .tmp/split.test.cjs && node .tmp/drag.test.cjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@codemirror/state": "^6.5.0",
+    "@codemirror/view": "^6.38.0",
+    "@types/node": "^22.0.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "typescript": "^5.6.0"
+  }
+}

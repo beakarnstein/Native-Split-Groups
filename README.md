@@ -1,19 +1,19 @@
 # Native Split Groups
 
-Al agrupar en una Base de Obsidian por una propiedad de lista, las notas que tengan múltiples opciones seleccionadas se mostrarán una vez debajo de cada opción, en lugar de crear un nuevo grupo con las opciones combinadas. Trabaja sobre las vistas nativas de Obsidian sin necesidad de crear vistas nuevas.
-Por ejemplo, una nota con la propiedad de lista "Género" que tenga seleccionadas las opciones de "Comedia" y "Romance", se mostrará una vez debajo del grupo de "Comedia" y otra debajo de "Romance"; en vez de la opción nativa de Obsidian de crear un grupo llamado "Comedia Romance".
+When grouping a Base by a list property, notes with multiple selected options will appear once under each option, rather than creating a new group with the merged options. This works with native views without requiring the creation of new ones.
+For example, a note with a "Genre" list property where both "Comedy" and "Romance" are selected, will appear once under the "Comedy" group and again under "Romance", instead of the default behavior of creating a group named "Comedy Romance".
 
-## Uso
+## Use
 
-1. Instalar el plugin y activarlo.
-2. En cualquier Base, usa **Agrupar por** con una propiedad de lista.
-3. Los grupos se dividirán solos según las opciones disponibles de la propiedad de lista.
+1. Install and activate the plugin.
+2. In any Base, use **Group by** with a list property.
+3. The groups will automatically split based on the available options for the list property.
 
-Se incluye en los Ajustes del plugin una opción para controlar qué comportamiento tiene una nota al moverse entre columnas de la vista Kanban (la nativa de Obsidian). Las opciones son:
-  1. *Sustituir todo por la columna nueva*: la lista queda solo con la opción correspondiente a la columna a la que se arrastró la nota.
-  2. *Agregar la columna nueva a las anteriores*: la columna nueva se añade como opción al final de la propiedad, sin afectar las opciones elegidas previamente.
-  3. *Reemplazar columna de origen por columna nueva*: se quita el valor de la columna de la que se arrastra, se pone el nuevo y el resto de las opciones queda intacto. Si no se puede saber el origen, actúa como la opción 2 y lanza un error (no borra el resto de las opciones).
+The plugin settings include an option to control how a note behaves when dragged between columns in the Kanban view (native view). The options are:
+  1. *Sustituir todo por la columna nueva*: the list is left with only the option corresponding to the column to which the note was dragged.
+  2. *Agregar la columna nueva a las anteriores*: the new column is added as an option at the end of the property, without affecting the previously selected options.
+  3. *Reemplazar columna de origen por columna nueva*: the value of the column from which the note is being dragged is removed, the new value is inserted, and the remaining options remain intact. If the source column cannot be determined, it behaves like option 2 and throws an error (without deleting the remaining options).
 
-## Instalación manual
+## Installing
 
-Copia `main.js` y `manifest.json` a `<tu-vault>/.obsidian/plugins/native-split-groups/`, recarga Obsidian y actívalo en Configuración → Complementos de la comunidad.
+Copy `main.js` and `manifest.json` to `<your-vault>/.obsidian/plugins/native-split-groups/`. Reload Obsidian and enable it under Settings → Community plugins.

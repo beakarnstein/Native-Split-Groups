@@ -3,6 +3,7 @@ import {
   BasesEntry,
   BasesEntryGroup,
   BasesQueryResult,
+  getLanguage,
   Notice,
   NullValue,
   Plugin,
@@ -14,6 +15,10 @@ import {
 } from "obsidian";
 import { GroupSortMode, ValueAdapter, normalizeKey, splitGroups } from "./split";
 import { DragMode, applyDragMode, isListToSingleValue, matchOrigin } from "./drag";
+import { makeT } from "./i18n";
+
+/** Translates interface strings using the Obsidian app language (English by default). */
+const t = makeT(() => getLanguage());
 
 interface Settings {
   enabled: boolean;
@@ -214,11 +219,11 @@ export default class NativeSplitGroupsPlugin extends Plugin {
 
     this.addCommand({
       id: "toggle-split-groups",
-      name: "Activar/desactivar la división de grupos en bases",
+      name: t("commandToggle"),
       callback: async () => {
         this.settings.enabled = !this.settings.enabled;
         await this.saveSettings();
-        new Notice(this.settings.enabled ? "División de grupos activada" : "División de grupos desactivada");
+        new Notice(this.settings.enabled ? t("noticeEnabled") : t("noticeDisabled"));
       },
     });
 
@@ -303,9 +308,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
       frontmatter[key] = res.value;
       console.debug("[native-split-groups] arrastre en", key, { before, after, origin, result: res.value });
       if (res.fallback) {
-        new Notice(
-          "Native split groups: no se encontró la columna de origen. Se agregó el valor nuevo sin quitar ninguno.",
-        );
+        new Notice(t("noticeSourceNotFound"));
       }
     }
   }
@@ -457,46 +460,46 @@ class SplitSettingTab extends PluginSettingTab {
   getSettingDefinitions(): SettingDefinitionItem[] {
     return [
       {
-        name: "Dividir grupos en opciones únicas de lista",
-        desc: "Cuando una base agrupa por una propiedad de lista, cada nota aparece en un grupo correspondiente a cada valor de la lista.",
+        name: t("enabledName"),
+        desc: t("enabledDesc"),
         control: { type: "toggle", key: "enabled", defaultValue: true },
       },
       {
-        name: "Unificación completa",
-        desc: "«main» y «main» forman un solo grupo; se unifican [[main]], [[carpeta/main.md]] y [[main|alias]]; y se ignora el # de las etiquetas.",
+        name: t("caseName"),
+        desc: t("caseDesc"),
         control: { type: "toggle", key: "caseInsensitive", defaultValue: true },
       },
       {
-        name: "Orden de los grupos",
-        desc: "«orden de bases» respeta el orden de agrupación nativo. Las notas dentro de cada grupo siempre mantienen el orden de la base.",
+        name: t("sortName"),
+        desc: t("sortDesc"),
         control: {
           type: "dropdown",
           key: "sortMode",
           defaultValue: "native",
           options: {
-            native: "Orden de Bases",
-            az: "A → Z",
-            za: "Z → A",
-            most: "Más notas primero",
-            fewest: "Menos notas primero",
+            native: t("sortNative"),
+            az: t("sortAz"),
+            za: t("sortZa"),
+            most: t("sortMost"),
+            fewest: t("sortFewest"),
           },
         },
       },
       {
         type: "group",
-        heading: "Arrastre en kanban",
+        heading: t("dragHeading"),
         items: [
           {
-            name: "Qué hacer con la lista al mover una tarjeta de columna",
-            desc: "Si no se puede saber de qué columna salió la tarjeta, la opción 3 se comporta como la 2.",
+            name: t("dragName"),
+            desc: t("dragDesc"),
             control: {
               type: "dropdown",
               key: "dragMode",
               defaultValue: "replace-all",
               options: {
-                "replace-all": "1. Sustituir todo por la columna nueva",
-                add: "2. Agregar la columna nueva a las anteriores",
-                "replace-origin": "3. Reemplazar columna de origen por columna nueva",
+                "replace-all": t("dragReplaceAll"),
+                add: t("dragAdd"),
+                "replace-origin": t("dragReplaceOrigin"),
               },
             },
           },
@@ -529,10 +532,8 @@ class SplitSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
-      .setName("Dividir grupos en opciones únicas de lista")
-      .setDesc(
-        "Cuando una base agrupa por una propiedad de lista, cada nota aparece en un grupo correspondiente a cada valor de la lista.",
-      )
+      .setName(t("enabledName"))
+.setDesc(t("enabledDesc"))
       .addToggle((t) =>
         t.setValue(this.plugin.settings.enabled).onChange(async (v) => {
           this.plugin.settings.enabled = v;
@@ -541,10 +542,8 @@ class SplitSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Unificación completa")
-      .setDesc(
-        "«main» y «main» forman un solo grupo; se unifican [[main]], [[carpeta/main.md]] y [[main|alias]]; y se ignora el # de las etiquetas.",
-      )
+      .setName(t("caseName"))
+.setDesc(t("caseDesc"))
       .addToggle((t) =>
         t.setValue(this.plugin.settings.caseInsensitive).onChange(async (v) => {
           this.plugin.settings.caseInsensitive = v;
@@ -553,18 +552,16 @@ class SplitSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Orden de los grupos")
-      .setDesc(
-        "«orden de bases» respeta el orden de agrupación nativo. Las notas dentro de cada grupo siempre mantienen el orden de la base.",
-      )
+      .setName(t("sortName"))
+.setDesc(t("sortDesc"))
       .addDropdown((d) =>
         d
           .addOptions({
-            native: "Orden de Bases",
-            az: "A → Z",
-            za: "Z → A",
-            most: "Más notas primero",
-            fewest: "Menos notas primero",
+            native: t("sortNative"),
+            az: t("sortAz"),
+            za: t("sortZa"),
+            most: t("sortMost"),
+            fewest: t("sortFewest"),
           })
           .setValue(this.plugin.settings.sortMode)
           .onChange(async (v) => {
@@ -574,17 +571,17 @@ class SplitSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl).setName("Arrastre en kanban").setHeading();
+    new Setting(containerEl).setName(t("dragHeading")).setHeading();
 
     new Setting(containerEl)
-      .setName("Qué hacer con la lista al mover una tarjeta de columna")
-      .setDesc("Si no se puede saber de qué columna salió la tarjeta, la opción 3 se comporta como la 2.")
+      .setName(t("dragName"))
+      .setDesc(t("dragDesc"))
       .addDropdown((d) =>
         d
           .addOptions({
-            "replace-all": "1. Sustituir todo por la columna nueva",
-            add: "2. Agregar la columna nueva a las anteriores",
-            "replace-origin": "3. Reemplazar columna de origen por columna nueva",
+            "replace-all": t("dragReplaceAll"),
+            add: t("dragAdd"),
+            "replace-origin": t("dragReplaceOrigin"),
           })
           .setValue(this.plugin.settings.dragMode)
           .onChange(async (v) => {

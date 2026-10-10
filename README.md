@@ -16,4 +16,4 @@ The plugin settings include an option to control how a note behaves when dragged
 
 ## Installing
 
-Copy `main.js` and `manifest.json` to `<your-vault>/.obsidian/plugins/native-split-groups/`. Reload Obsidian and enable it under Settings → Community plugins.
+Copy `main.js` and `manifest.json` to 'native-split-groups' inside your plugins folder. Reload the program and enable the plugin under Settings → Community plugins.

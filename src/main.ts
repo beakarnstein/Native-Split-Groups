@@ -1,21 +1,27 @@
 import {
+  apiVersion,
   App,
   BasesEntry,
   BasesEntryGroup,
   BasesQueryResult,
   getLanguage,
+  ListValue,
   Notice,
   NullValue,
   Plugin,
   PluginSettingTab,
   Setting,
   SettingDefinitionItem,
+  StringValue,
+  TFile,
   Value,
   WorkspaceLeaf,
 } from "obsidian";
-import { GroupSortMode, ValueAdapter, normalizeKey, splitGroups } from "./split";
+import { ValueAdapter, normalizeKey, splitGroups } from "./split";
 import { DragMode, applyDragMode, isListToSingleValue, matchOrigin } from "./drag";
 import { makeT } from "./i18n";
+import { describeShape, findGroupOrderPath, hideGroupOrder, holderAt, installProbe, readGroupOrder } from "./config";
+import { NO_VALUE, applyGroupOrder, listHoldsKey, menuGroups, parseGroupOrder, withEmptyColumns } from "./order";
 
 /** Translates interface strings using the Obsidian app language (English by default). */
 const t = makeT(() => getLanguage());
@@ -23,8 +29,9 @@ const t = makeT(() => getLanguage());
 interface Settings {
   enabled: boolean;
   caseInsensitive: boolean;
-  sortMode: GroupSortMode;
+  sortMode: PluginSortMode;
   dragMode: DragMode;
+  debug: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -32,6 +39,7 @@ const DEFAULTS: Settings = {
   caseInsensitive: true,
   sortMode: "native",
   dragMode: "replace-all",
+  debug: false,
 };
 
 const BASES_CONTAINER = '.bases-view, .bases-embed, .workspace-leaf-content[data-type="bases"]';
@@ -39,7 +47,6 @@ const BASES_CONTAINER = '.bases-view, .bases-embed, .workspace-leaf-content[data
 interface DragState {
   start: number;
   end: number;
-  /** Textos de cabecera (normalizados) alrededor de la tarjeta, del nivel más cercano al más lejano. */
   levels: string[][];
 }
 
@@ -48,7 +55,6 @@ interface ListLike {
   get: (index: number) => Value;
 }
 
-/** Getter leído de un prototipo, sin el `any` de `PropertyDescriptor`. */
 interface TypedDescriptor {
   configurable?: boolean;
   enumerable?: boolean;
@@ -64,27 +70,53 @@ type ProcessFn = (
   options?: unknown,
 ) => unknown;
 
+interface BasesController {
+  viewName?: unknown;
+  query?: { getViewConfig?: (name: unknown) => unknown };
+  results?: { values?: () => Iterable<BasesEntry> };
+}
+
+interface KanbanLike {
+  data?: { data?: unknown; groupedData?: unknown };
+  config?: unknown;
+  orderedGroups?: BasesEntryGroup[];
+  isManualSort?: unknown;
+}
+
+interface PatchedMethod {
+  proto: Record<string, unknown>;
+  name: string;
+  original: unknown;
+  wrapper: unknown;
+}
+
 interface LeafRebuild {
   rebuildView?: () => unknown;
 }
 
-const SORT_MODES: readonly GroupSortMode[] = ["native", "az", "za", "most", "fewest"];
-const DRAG_MODES: readonly DragMode[] = ["replace-all", "add", "replace-origin"];
+type PluginSortMode = "native" | "most" | "fewest";
+const SORT_MODES: readonly PluginSortMode[] = ["native", "most", "fewest"];
 
-function isSortMode(v: unknown): v is GroupSortMode {
+function isSortMode(v: unknown): v is PluginSortMode {
   return typeof v === "string" && (SORT_MODES as readonly string[]).includes(v);
 }
+
+const DRAG_MODES: readonly DragMode[] = ["replace-all", "add", "replace-origin"];
 
 function isDragMode(v: unknown): v is DragMode {
   return typeof v === "string" && (DRAG_MODES as readonly string[]).includes(v);
 }
 
 function isSettingsKey(v: string): v is keyof Settings {
-  return v === "enabled" || v === "caseInsensitive" || v === "sortMode" || v === "dragMode";
+  return v === "enabled" || v === "caseInsensitive" || v === "sortMode" || v === "dragMode" || v === "debug";
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
+}
+
+function isFn(v: unknown): boolean {
+  return typeof v === "function";
 }
 
 function isListLike(v: unknown): v is ListLike {
@@ -127,7 +159,6 @@ function hasGroupedDataAccessor(proto: unknown): proto is object {
 function descriptorOf(proto: object): TypedDescriptor | undefined {
   const desc = Object.getOwnPropertyDescriptor(proto, "groupedData");
   if (typeof desc?.get !== "function") return undefined;
-  // eslint-disable-next-line @typescript-eslint/unbound-method -- hay que conservar el getter original antes de reemplazarlo
   const get = desc.get;
   return {
     configurable: desc.configurable,
@@ -185,6 +216,7 @@ function readSettings(raw: unknown): Settings {
     caseInsensitive: typeof stored.caseInsensitive === "boolean" ? stored.caseInsensitive : DEFAULTS.caseInsensitive,
     sortMode: isSortMode(stored.sortMode) ? stored.sortMode : DEFAULTS.sortMode,
     dragMode: isDragMode(stored.dragMode) ? stored.dragMode : DEFAULTS.dragMode,
+    debug: typeof stored.debug === "boolean" ? stored.debug : DEFAULTS.debug,
   };
 }
 
@@ -193,14 +225,122 @@ function entryPath(entry: BasesEntry): string {
   return file.path || file.name;
 }
 
+function describeValue(v: unknown): string {
+  if (v === undefined) return "undefined";
+  if (v === null) return "null";
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return `${typeof v}:${String(v)}`;
+  if (!isRecord(v)) return typeof v;
+  const ctor = (v as { constructor?: { name?: string } }).constructor?.name ?? "?";
+  return `${ctor}:${valueText(v as unknown as Value)}`;
+}
+
+function groupsSignature(groups: readonly BasesEntryGroup[]): string {
+  const parts: string[] = [];
+  for (const g of groups) {
+    const paths = Array.isArray(g.entries) ? g.entries.map(entryPath).join("\u0001") : "";
+    parts.push(`${describeValue(g.key)}\u0002${paths}`);
+  }
+  return parts.join("\u0003");
+}
+
+interface GroupSummary {
+  key: string;
+  list: boolean;
+  entries: number;
+}
+
+interface BuildInfo {
+  order: number | null;
+  holder: string | null;
+  unfiltered: number | null;
+}
+
+interface DiagEntry {
+  at: string;
+  note: string;
+  resultId: number;
+  dataCount: number;
+  caller: string[];
+  repeat: number;
+  info: BuildInfo;
+  raw: GroupSummary[];
+  out: GroupSummary[] | null;
+}
+
+function summarize(groups: readonly BasesEntryGroup[]): GroupSummary[] {
+  return groups.map((g) => ({
+    key: describeValue(g.key),
+    list: g.key !== undefined && isListLike(g.key),
+    entries: Array.isArray(g.entries) ? g.entries.length : -1,
+  }));
+}
+
+function callerLines(): string[] {
+  const stack = new Error().stack;
+  if (!stack) return [];
+  return stack
+    .split("\n")
+    .slice(3, 10)
+    .map((line) => line.trim().replace(/\s+/g, " ").slice(0, 160));
+}
+
+interface ProbeEntry {
+  at: string;
+  target: string;
+  op: string;
+  resultId: number;
+  repeat: number;
+  value: string;
+  stack: string[];
+}
+
+function stackLines(skip: number): string[] {
+  const stack = new Error().stack;
+  if (!stack) return [];
+  return stack
+    .split("\n")
+    .slice(skip, skip + 12)
+    .map((line) => line.trim().replace(/\s+/g, " ").slice(0, 160));
+}
+
+function briefValue(v: unknown): string {
+  if (!Array.isArray(v)) return typeof v;
+  let text: string;
+  try {
+    text = JSON.stringify(v.slice(0, 2));
+  } catch {
+    text = "?";
+  }
+  return `array(${v.length}) ${text.slice(0, 80)}`;
+}
+
+function fileOfView(view: unknown): unknown {
+  return isRecord(view) ? view.file : undefined;
+}
+
 export default class NativeSplitGroupsPlugin extends Plugin {
   settings: Settings = { ...DEFAULTS };
 
   private patchedProto: object | null = null;
   private originalDescriptor: TypedDescriptor | null = null;
+  private patchedGetter: ((this: object) => unknown) | null = null;
   private version = 0;
-  private cache = new WeakMap<object, { version: number; result: BasesEntryGroup[] }>();
+  private nativeGetter: ((this: unknown) => unknown) | null = null;
+  private cache = new WeakMap<object, { version: number; sig: string; result: BasesEntryGroup[]; info: BuildInfo }>();
+  private holderPaths = new WeakMap<object, { path: string[] | null; at: number }>();
+  private lastFingerprint = "";
+  private internals = new Map<number, string[]>();
   private drag: DragState | null = null;
+  private diagLog: DiagEntry[] = [];
+  private resultIds = new WeakMap<object, number>();
+  private nextResultId = 1;
+  private probeLog: ProbeEntry[] = [];
+  private probed = new WeakSet<object>();
+  private selfReads = 0;
+  private matchDepth = 0;
+  private unloaded = false;
+  private methodPatches: PatchedMethod[] = [];
+  private wrappers = new WeakMap<object, Map<string, BasesEntry>>();
 
   async onload() {
     this.settings = readSettings((await this.loadData()) as unknown);
@@ -227,13 +367,35 @@ export default class NativeSplitGroupsPlugin extends Plugin {
       },
     });
 
-    const attempt = () => this.tryPatch();
+    this.addCommand({
+      id: "copy-diagnostics",
+      name: t("commandDiag"),
+      callback: () => {
+        void this.copyDiagnostics();
+      },
+    });
+
+    this.patchListMatching();
+
+    const attempt = () => {
+      this.tryPatch();
+      for (const delay of [300, 1000, 2500, 5000]) {
+        window.setTimeout(() => {
+          if (!this.unloaded) this.tryPatch();
+        }, delay);
+      }
+    };
     this.app.workspace.onLayoutReady(attempt);
     this.registerEvent(this.app.workspace.on("layout-change", attempt));
     this.registerEvent(this.app.workspace.on("active-leaf-change", attempt));
   }
 
   onunload() {
+    this.unloaded = true;
+    for (const p of this.methodPatches) {
+      if (p.proto[p.name] === p.wrapper) p.proto[p.name] = p.original;
+    }
+    this.methodPatches = [];
     if (this.patchedProto && this.originalDescriptor) {
       Object.defineProperty(this.patchedProto, "groupedData", this.originalDescriptor);
     }
@@ -347,7 +509,17 @@ export default class NativeSplitGroupsPlugin extends Plugin {
   }
 
   private tryPatch() {
-    if (this.patchedProto) return;
+    const viewsPatched = this.tryPatchViews();
+    if (this.patchedProto) {
+      const current = Object.getOwnPropertyDescriptor(this.patchedProto, "groupedData");
+      if (current?.get === this.patchedGetter) {
+        if (viewsPatched) this.refreshBases();
+        return;
+      }
+      this.patchedProto = null;
+      this.patchedGetter = null;
+      this.originalDescriptor = null;
+    }
     const proto = this.findQueryResultProto();
     if (!proto) return;
 
@@ -358,21 +530,35 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     this.patchedProto = proto;
 
     const plugin = bind(this);
+    this.nativeGetter = previous;
     const get = function (this: object): unknown {
-      const raw = callGetter(previous, this);
-      if (!plugin.settings.enabled || !Array.isArray(raw)) return raw;
+      const raw = plugin.withoutMatching(() => callGetter(previous, this));
+      if (!Array.isArray(raw)) return raw;
       const groups = raw as BasesEntryGroup[];
+      const noInfo: BuildInfo = { order: null, holder: null, unfiltered: null };
+      if (!plugin.settings.enabled) {
+        plugin.recordDiag(this, groups, null, "disabled", noInfo, "disabled");
+        return raw;
+      }
+      const manual = plugin.manualOrderOf(this);
+      const sig = `${groupsSignature(groups)}\u0004${manual ? manual.order.join("\u0005") : "-"}`;
       const hit = plugin.cache.get(this);
-      if (hit && hit.version === plugin.version) return hit.result;
+      if (hit && hit.version === plugin.version && hit.sig === sig) {
+        plugin.recordDiag(this, groups, hit.result, "cache-hit", hit.info, sig);
+        return hit.result;
+      }
       try {
-        const result = plugin.split(this, groups);
-        plugin.cache.set(this, { version: plugin.version, result });
-        return result;
+        const built = plugin.build(this, groups, manual);
+        plugin.cache.set(this, { version: plugin.version, sig, result: built.groups, info: built.info });
+        plugin.recordDiag(this, groups, built.groups, "split", built.info, sig);
+        return built.groups;
       } catch (err) {
         console.error("[native-split-groups] Error al dividir grupos, se usan los grupos originales", err);
+        plugin.recordDiag(this, groups, null, `error: ${err instanceof Error ? err.message : String(err)}`, noInfo, sig);
         return raw;
       }
     };
+    this.patchedGetter = get;
 
     Object.defineProperty(proto, "groupedData", {
       configurable: desc.configurable,
@@ -387,15 +573,395 @@ export default class NativeSplitGroupsPlugin extends Plugin {
   private split(result: object, groups: BasesEntryGroup[]): BasesEntryGroup[] {
     const data = "data" in result ? result.data : undefined;
     const ordered = Array.isArray(data) ? (data as BasesEntry[]) : [];
-    return splitGroups(groups, ordered, entryPath, adapter, this.splitOptions(), (template, key, entries) => {
-      const created = Object.create(prototypeOf(template)) as BasesEntryGroup;
-      Object.assign(created, template, { key, entries });
-      return created;
+    return splitGroups(groups, ordered, entryPath, adapter, this.splitOptions(result), (template, key, entries) => {
+      const norm = this.keyNorm(key);
+      return this.makeGroup(
+        template,
+        key,
+        entries.map((e) => this.wrapEntry(e, norm)),
+      );
     });
   }
 
-  private splitOptions() {
-    return { caseInsensitive: this.settings.caseInsensitive, sortMode: this.settings.sortMode };
+  private keyNorm(key: Value | undefined): string {
+    return key === undefined || isNullValue(key) ? NO_VALUE : normalizeKey(valueText(key), this.settings.caseInsensitive);
+  }
+
+  private makeGroup(template: BasesEntryGroup, key: Value | undefined, entries: BasesEntry[]): BasesEntryGroup {
+    const created = Object.create(prototypeOf(template)) as BasesEntryGroup;
+    Object.assign(created, template, { key, entries });
+    return created;
+  }
+
+  private wrapEntry(entry: BasesEntry, norm: string): BasesEntry {
+    let per = this.wrappers.get(entry);
+    if (!per) {
+      per = new Map();
+      this.wrappers.set(entry, per);
+    }
+    let wrapped = per.get(norm);
+    if (!wrapped) {
+      wrapped = Object.create(entry) as BasesEntry;
+      per.set(norm, wrapped);
+    }
+    return wrapped;
+  }
+
+  private sortModeOf(result: object): "az" | "za" | "most" | "fewest" {
+    if (this.settings.sortMode !== "native") return this.settings.sortMode;
+    const config = "config" in result ? result.config : undefined;
+    const groupBy = isRecord(config) ? config.groupBy : undefined;
+    return isRecord(groupBy) && groupBy.direction === "DESC" ? "za" : "az";
+  }
+
+  private splitOptions(result: object) {
+    return { caseInsensitive: this.settings.caseInsensitive, sortMode: this.sortModeOf(result) };
+  }
+
+  // ---- Vistas de Bases (controlador y kanban) --------------------------------
+
+  private tryPatchViews(): boolean {
+    let changed = false;
+    const plugin = bind(this);
+
+    const controller = this.findViewProto((proto) => isFn(proto.getAllGroups) && isFn(proto.notifyView));
+    if (controller && !this.isPatched(controller, "notifyView")) {
+      this.wrapMethod(controller, "notifyView", function (this: unknown, original, args) {
+        plugin.matchDepth++;
+        try {
+          return Reflect.apply(original, this, args) as unknown;
+        } finally {
+          plugin.matchDepth--;
+        }
+      });
+      this.wrapMethod(controller, "getAllGroups", function (this: unknown, original, args) {
+        if (plugin.settings.enabled) {
+          try {
+            const rows = plugin.menuRows(this as BasesController);
+            if (rows) return rows;
+          } catch (err) {
+            console.error("[native-split-groups] Error en la lista del menú Group, se usa la de Obsidian", err);
+          }
+        }
+        return Reflect.apply(original, this, args) as unknown;
+      });
+      changed = true;
+    }
+
+    const kanban = this.findViewProto((proto) => isFn(proto.finishDisplay) && isFn(proto.renderColumns));
+    if (kanban && !this.isPatched(kanban, "finishDisplay")) {
+      this.wrapMethod(kanban, "finishDisplay", function (this: unknown, original, args) {
+        if (plugin.settings.enabled) {
+          try {
+            const view = this as KanbanLike;
+            const columns = plugin.kanbanColumns(view);
+            if (columns) view.orderedGroups = columns;
+          } catch (err) {
+            console.error("[native-split-groups] Error en las columnas del kanban, se usan las de Obsidian", err);
+          }
+        }
+        return Reflect.apply(original, this, args) as unknown;
+      });
+      changed = true;
+    }
+    return changed;
+  }
+
+  private withoutMatching<T>(fn: () => T): T {
+    const saved = this.matchDepth;
+    this.matchDepth = 0;
+    try {
+      return fn();
+    } finally {
+      this.matchDepth = saved;
+    }
+  }
+
+  private isPatched(proto: Record<string, unknown>, name: string): boolean {
+    return this.methodPatches.some((p) => p.proto === proto && p.name === name && proto[name] === p.wrapper);
+  }
+
+  private wrapMethod(
+    proto: Record<string, unknown>,
+    name: string,
+    impl: (this: unknown, original: (...a: unknown[]) => unknown, args: unknown[]) => unknown,
+  ) {
+    const original = proto[name] as (...a: unknown[]) => unknown;
+    const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+      return impl.call(this, original, args);
+    };
+    proto[name] = wrapper;
+    this.methodPatches.push({ proto, name, original, wrapper });
+  }
+
+  private findViewProto(pred: (proto: Record<string, unknown>) => boolean): Record<string, unknown> | null {
+    let found: Record<string, unknown> | null = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (found || leaf.view.getViewType() !== "bases") return;
+      const proto = this.scanFor(leaf.view, (p) => isRecord(p) && pred(p));
+      if (proto && isRecord(proto)) found = proto;
+    });
+    return found;
+  }
+
+  private patchListMatching() {
+    const proto = ListValue.prototype as unknown as Record<string, unknown>;
+    if (!isFn(proto.looseEquals)) return;
+    const plugin = bind(this);
+    const original = proto.looseEquals as (this: unknown, other: unknown) => boolean;
+    const wrapper = function (this: unknown, other: unknown): boolean {
+      const result = Reflect.apply(original, this, [other]) as boolean;
+      if (result || plugin.matchDepth === 0 || !plugin.settings.enabled) return result;
+      return plugin.listHolds(this, other);
+    };
+    proto.looseEquals = wrapper;
+    this.methodPatches.push({ proto, name: "looseEquals", original, wrapper });
+  }
+
+  private listHolds(list: unknown, key: unknown): boolean {
+    if (!isListLike(list) || !isRecord(key)) return false;
+    return listHoldsKey(list as unknown as Value, key as unknown as Value, adapter, this.settings.caseInsensitive);
+  }
+
+  private groupValues(entries: Iterable<BasesEntry>, property: unknown): Value[] | null {
+    if (typeof property !== "string") return null;
+    const values: Value[] = [];
+    let anyList = false;
+    for (const entry of entries) {
+      let value: Value | undefined;
+      try {
+        value = (entry as unknown as { getValue: (p: string) => Value | undefined }).getValue(property);
+      } catch {
+        value = undefined;
+      }
+      if (value === undefined) value = NullValue.value;
+      if (adapter.isList(value)) anyList = true;
+      values.push(value);
+    }
+    return anyList ? values : null;
+  }
+
+  private keyFor(label: string | null): Value {
+    return label === null ? NullValue.value : new StringValue(label);
+  }
+
+  private menuRows(ctl: BasesController): Array<{ key: Value; count: number; isVisible: boolean }> | null {
+    const config = ctl.query?.getViewConfig?.(ctl.viewName);
+    if (!isRecord(config) || !isRecord(config.groupBy) || !Array.isArray(config.groupOrder)) return null;
+    const order = parseGroupOrder(config.groupOrder, this.settings.caseInsensitive);
+    const entries = ctl.results?.values?.();
+    if (!order || !entries) return null;
+    const values = this.groupValues(entries, config.groupBy.property);
+    if (!values) return null;
+    return menuGroups(values, order, adapter, this.settings.caseInsensitive).map((row) => ({
+      key: row.key ?? this.keyFor(row.label),
+      count: row.count,
+      isVisible: row.isVisible,
+    }));
+  }
+
+  private kanbanColumns(view: KanbanLike): BasesEntryGroup[] | null {
+    const config = view.config;
+    const data = view.data;
+    if (!isRecord(config) || !isRecord(config.groupBy) || !Array.isArray(config.groupOrder)) return null;
+    if (!data || !Array.isArray(data.data) || !Array.isArray(data.groupedData)) return null;
+    if (!this.groupValues(data.data as BasesEntry[], config.groupBy.property)) return null;
+    const order = parseGroupOrder(config.groupOrder, this.settings.caseInsensitive);
+    if (!order) return null;
+    const groups = data.groupedData as BasesEntryGroup[];
+    const template = groups[0] ?? view.orderedGroups?.[0];
+    return withEmptyColumns<Value, BasesEntry, BasesEntryGroup>(
+      groups,
+      order,
+      adapter,
+      this.settings.caseInsensitive,
+      (label) => (template ? this.makeGroup(template, this.keyFor(label), []) : null),
+    );
+  }
+
+  // ---- Diagnóstico ----------------------------------------------------------
+
+  private recordDiag(
+    result: object,
+    raw: BasesEntryGroup[],
+    out: BasesEntryGroup[] | null,
+    note: string,
+    info: BuildInfo,
+    sig: string,
+  ) {
+    if (!this.settings.debug) return;
+    let id = this.resultIds.get(result);
+    if (id === undefined) {
+      id = this.nextResultId++;
+      this.resultIds.set(result, id);
+      this.internals.set(id, describeShape(result));
+    }
+    const caller = callerLines();
+    const fingerprint = `${note}|${id}|${caller.slice(0, 3).join("|")}|${sig}`;
+    const last = this.diagLog[this.diagLog.length - 1];
+    if (last && fingerprint === this.lastFingerprint) {
+      last.repeat++;
+      last.at = new Date().toISOString();
+      return;
+    }
+    this.lastFingerprint = fingerprint;
+    const data = "data" in result ? result.data : undefined;
+    this.diagLog.push({
+      at: new Date().toISOString(),
+      note,
+      resultId: id,
+      dataCount: Array.isArray(data) ? data.length : -1,
+      caller,
+      repeat: 1,
+      info,
+      raw: summarize(raw),
+      out: out ? summarize(out) : null,
+    });
+    if (this.diagLog.length > 40) this.diagLog.shift();
+  }
+
+  // ---- Orden manual (groupOrder) ---------------------------------------------
+
+  private manualOrderOf(result: object): { path: string[]; order: string[] } | null {
+    const now = Date.now();
+    const cached = this.holderPaths.get(result);
+    let path: string[] | null;
+    if (cached && (cached.path !== null || now - cached.at < 2000)) {
+      path = cached.path;
+    } else {
+      path = findGroupOrderPath(result);
+      this.holderPaths.set(result, { path, at: now });
+    }
+    if (!path) return null;
+    this.installProbes(result, path);
+    this.selfReads++;
+    let rawOrder: unknown;
+    try {
+      rawOrder = readGroupOrder(result, path);
+    } finally {
+      this.selfReads--;
+    }
+    const parsed = parseGroupOrder(rawOrder, this.settings.caseInsensitive);
+    if (!parsed) {
+      this.holderPaths.delete(result);
+      return null;
+    }
+    return { path, order: parsed.map((e) => e.key) };
+  }
+
+  private installProbes(result: object, path: string[]) {
+    if (!this.settings.debug || this.probed.has(result)) return;
+    this.probed.add(result);
+    let id = this.resultIds.get(result);
+    if (id === undefined) {
+      id = this.nextResultId++;
+      this.resultIds.set(result, id);
+      this.internals.set(id, describeShape(result));
+    }
+    const holder = holderAt(result, path);
+    const targets: Array<[object | null, string, string]> = [
+      [holder, "groupOrder", `${path.join(".") || "(root)"}.groupOrder`],
+      [result, "groupedDataCache", "result.groupedDataCache"],
+    ];
+    for (const [obj, key, label] of targets) {
+      if (!obj) continue;
+      installProbe(obj, key, (op, value) => {
+        if (!this.settings.debug || this.selfReads > 0) return;
+        const stack = stackLines(3);
+        const fp = `${label}|${op}|${stack.slice(0, 6).join("|")}`;
+        const last = this.probeLog[this.probeLog.length - 1] as (ProbeEntry & { fp?: string }) | undefined;
+        if (last && last.fp === fp) {
+          last.repeat++;
+          return;
+        }
+        const entry: ProbeEntry & { fp?: string } = {
+          at: new Date().toISOString(),
+          target: label,
+          op,
+          resultId: id,
+          repeat: 1,
+          value: briefValue(value),
+          stack,
+          fp,
+        };
+        this.probeLog.push(entry);
+        if (this.probeLog.length > 60) this.probeLog.shift();
+      });
+    }
+    if (holder) this.internals.set(1000 + id, ["[holder shape of result " + String(id) + "]", ...describeShape(holder, 1, 40)]);
+  }
+
+  private callWithoutGroupOrder(result: object, path: string[]): BasesEntryGroup[] | null {
+    const native = this.nativeGetter;
+    if (!native) return null;
+    try {
+      const out = this.withoutMatching(() => callGetter(native, hideGroupOrder(result, path)));
+      return Array.isArray(out) ? (out as BasesEntryGroup[]) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private build(
+    result: object,
+    groups: BasesEntryGroup[],
+    manual: { path: string[]; order: string[] } | null,
+  ): { groups: BasesEntryGroup[]; info: BuildInfo } {
+    if (!manual) {
+      return { groups: this.split(result, groups), info: { order: null, holder: null, unfiltered: null } };
+    }
+    const unfiltered = this.callWithoutGroupOrder(result, manual.path);
+    const info: BuildInfo = {
+      order: manual.order.length,
+      holder: manual.path.join(".") || "(root)",
+      unfiltered: unfiltered ? unfiltered.length : null,
+    };
+    const base = unfiltered ?? groups;
+    if (!base.some((g) => g.key !== undefined && isListLike(g.key))) return { groups, info };
+    const split = this.split(result, base);
+    return {
+      groups: applyGroupOrder<Value, BasesEntry, BasesEntryGroup>(
+        split,
+        manual.order,
+        adapter,
+        this.settings.caseInsensitive,
+      ),
+      info,
+    };
+  }
+
+  private async buildReport(): Promise<string> {
+    const lines: string[] = [];
+    lines.push(`native-split-groups ${this.manifest.version} · Obsidian API ${apiVersion} · language ${getLanguage()}`);
+    lines.push(`settings: ${JSON.stringify(this.settings)}`);
+    lines.push(`getter still patched: ${this.patchedProto !== null}`);
+    if (!this.settings.debug) lines.push("NOTE: Diagnostics is off, so the call log below is empty.");
+    const seen = new Set<string>();
+    for (const leaf of this.app.workspace.getLeavesOfType("bases")) {
+      const file = fileOfView(leaf.view);
+      if (!(file instanceof TFile) || seen.has(file.path)) continue;
+      seen.add(file.path);
+      lines.push(`--- ${file.name} ---`);
+      lines.push(await this.app.vault.cachedRead(file));
+    }
+    lines.push("--- result internals (by resultId) ---");
+    lines.push(JSON.stringify(Object.fromEntries(this.internals), null, 1));
+    lines.push("--- reads/writes of groupOrder and groupedDataCache (oldest first) ---");
+    lines.push(JSON.stringify(this.probeLog.map(({ ...e }) => ({ ...e, fp: undefined })), null, 1));
+    lines.push("--- groupedData calls (oldest first; repeat = identical consecutive calls) ---");
+    lines.push(JSON.stringify(this.diagLog, null, 1));
+    return lines.join("\n");
+  }
+
+  private async copyDiagnostics() {
+    const report = await this.buildReport();
+    try {
+      await navigator.clipboard.writeText(report);
+      new Notice(t("noticeDiagCopied"));
+    } catch {
+      console.info(report);
+      new Notice(t("noticeDiagFailed"));
+    }
   }
 
   private findQueryResultProto(): object | null {
@@ -404,12 +970,12 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     let found: object | null = null;
     this.app.workspace.iterateAllLeaves((leaf) => {
       if (found) return;
-      found = this.scanForQueryResult(leaf.view);
+      found = this.scanFor(leaf.view, (proto, obj) => hasGroupedDataAccessor(proto) && "data" in obj);
     });
     return found;
   }
 
-  private scanForQueryResult(root: unknown): object | null {
+  private scanFor(root: unknown, matches: (proto: object, obj: Record<string, unknown>) => boolean): object | null {
     const seen = new Set<unknown>();
     const skip = new Set(["app", "leaf", "containerEl", "contentEl", "parent", "parentEl", "scope", "workspace"]);
     const queue: Array<[unknown, number]> = [[root, 0]];
@@ -421,7 +987,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
       seen.add(obj);
       if (typeof Node !== "undefined" && obj instanceof Node) continue;
       const proto = prototypeOf(obj);
-      if (proto && hasGroupedDataAccessor(proto) && "data" in obj) return proto;
+      if (proto && matches(proto, obj)) return proto;
       if (depth >= 4) continue;
       for (const key of Object.keys(obj)) {
         if (skip.has(key)) continue;
@@ -437,7 +1003,6 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     return null;
   }
 
-  /** Obliga a las bases abiertas a volver a leer groupedData. */
   refreshBases() {
     this.app.workspace.iterateAllLeaves((leaf: WorkspaceLeaf) => {
       if (leaf.view.getViewType() !== "bases") return;
@@ -456,7 +1021,6 @@ class SplitSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
-  /** Búsqueda de ajustes en Obsidian 1.13+. En versiones anteriores se usa display(). */
   getSettingDefinitions(): SettingDefinitionItem[] {
     return [
       {
@@ -478,8 +1042,6 @@ class SplitSettingTab extends PluginSettingTab {
           defaultValue: "native",
           options: {
             native: t("sortNative"),
-            az: t("sortAz"),
-            za: t("sortZa"),
             most: t("sortMost"),
             fewest: t("sortFewest"),
           },
@@ -505,6 +1067,11 @@ class SplitSettingTab extends PluginSettingTab {
           },
         ],
       },
+      {
+        name: t("debugName"),
+        desc: t("debugDesc"),
+        control: { type: "toggle", key: "debug", defaultValue: false },
+      },
     ];
   }
 
@@ -515,7 +1082,7 @@ class SplitSettingTab extends PluginSettingTab {
 
   async setControlValue(key: string, value: unknown): Promise<void> {
     const settings = this.plugin.settings;
-    if ((key === "enabled" || key === "caseInsensitive") && typeof value === "boolean") {
+    if ((key === "enabled" || key === "caseInsensitive" || key === "debug") && typeof value === "boolean") {
       settings[key] = value;
     } else if (key === "sortMode" && isSortMode(value)) {
       settings.sortMode = value;
@@ -553,16 +1120,10 @@ class SplitSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName(t("sortName"))
-.setDesc(t("sortDesc"))
+      .setDesc(t("sortDesc"))
       .addDropdown((d) =>
         d
-          .addOptions({
-            native: t("sortNative"),
-            az: t("sortAz"),
-            za: t("sortZa"),
-            most: t("sortMost"),
-            fewest: t("sortFewest"),
-          })
+          .addOptions({ native: t("sortNative"), most: t("sortMost"), fewest: t("sortFewest") })
           .setValue(this.plugin.settings.sortMode)
           .onChange(async (v) => {
             if (!isSortMode(v)) return;
@@ -589,6 +1150,16 @@ class SplitSettingTab extends PluginSettingTab {
             this.plugin.settings.dragMode = v;
             await this.plugin.saveSettings();
           }),
+      );
+
+    new Setting(containerEl)
+      .setName(t("debugName"))
+      .setDesc(t("debugDesc"))
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.debug).onChange(async (v) => {
+          this.plugin.settings.debug = v;
+          await this.plugin.saveSettings();
+        }),
       );
   }
 }

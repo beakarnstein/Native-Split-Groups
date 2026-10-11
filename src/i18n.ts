@@ -20,10 +20,8 @@ const en = {
 
   sortName: "Group order",
   sortDesc:
-    "\"Bases order\" follows the native grouping order. Notes inside each group always keep the base's order.",
-  sortNative: "Bases order",
-  sortAz: "A → Z",
-  sortZa: "Z → A",
+    "\"Obsidian's order\" follows the choice in the Group menu. Notes inside each group keep the base's order.",
+  sortNative: "Obsidian's order",
   sortMost: "Most notes first",
   sortFewest: "Fewest notes first",
 
@@ -33,6 +31,13 @@ const en = {
   dragReplaceAll: "1. Replace everything with the new column",
   dragAdd: "2. Add the new column to the previous ones",
   dragReplaceOrigin: "3. Replace the source column with the new column",
+
+  debugName: "Diagnostics",
+  debugDesc:
+    "Records how Bases hands over its groups so a problem can be reported. Turn it on, reproduce the problem, then run the command \"Copy diagnostics\". Leave it off otherwise.",
+  commandDiag: "Copy diagnostics",
+  noticeDiagCopied: "Diagnostics copied to the clipboard",
+  noticeDiagFailed: "Could not copy to the clipboard; the diagnostics were written to the developer console",
 };
 
 export type TKey = keyof typeof en;
@@ -48,16 +53,14 @@ const es: Record<TKey, string> = {
   enabledDesc:
     "Cuando una base agrupa por una propiedad de lista, cada nota aparece en un grupo correspondiente a cada valor de la lista.",
 
-  caseName: "Unificación completa",
+  caseName: "Combinar valores equivalentes",
   caseDesc:
     "«Main» y «main» forman un solo grupo; se unifican [[main]], [[carpeta/main.md]] y [[main|alias]]; y se ignora el # de las etiquetas.",
 
   sortName: "Orden de los grupos",
   sortDesc:
-    "«Orden de Bases» respeta el orden de agrupación nativo. Las notas dentro de cada grupo siempre mantienen el orden de la base.",
-  sortNative: "Orden de Bases",
-  sortAz: "A → Z",
-  sortZa: "Z → A",
+    "\"Orden de Obsidian\" sigue la opción del menú Grupo. Las notas dentro de cada grupo mantienen el orden de la base.",
+  sortNative: "Orden de Obsidian",
   sortMost: "Más notas primero",
   sortFewest: "Menos notas primero",
 
@@ -67,6 +70,13 @@ const es: Record<TKey, string> = {
   dragReplaceAll: "1. Sustituir todo por la columna nueva",
   dragAdd: "2. Agregar la columna nueva a las anteriores",
   dragReplaceOrigin: "3. Reemplazar columna de origen por columna nueva",
+
+  debugName: "Diagnóstico",
+  debugDesc:
+    "Registra cómo maneja Bases sus grupos para poder reportar un problema. Actívalo, reproduce el problema y ejecuta el comando \"Copiar diagnóstico\". Déjalo desactivado el resto del tiempo.",
+  commandDiag: "Copiar diagnóstico",
+  noticeDiagCopied: "Diagnóstico copiado al portapapeles",
+  noticeDiagFailed: "No se pudo copiar al portapapeles; el diagnóstico se escribió en la consola de desarrollador",
 };
 
 export type Locale = "en" | "es";

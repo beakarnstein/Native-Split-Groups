@@ -1,7 +1,6 @@
 export type GroupSortMode = "native" | "az" | "za" | "most" | "fewest";
 
 export interface SplitOptions {
-  /** `Main` y `main` son el mismo grupo. */
   caseInsensitive: boolean;
   sortMode: GroupSortMode;
 }
@@ -20,12 +19,6 @@ export interface GroupLike<V, E> {
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
-/**
- * Clave de agrupación para un valor de texto:
- *  - `[[Main]]`, `[[Recipes/Main.md]]`, `[[Main|Plato principal]]` y `main` comparten grupo
- *  - el `#` inicial de una etiqueta se descarta
- *  - espacios repetidos se colapsan
- */
 export function normalizeKey(raw: string, caseInsensitive = true): string {
   let s = String(raw ?? "").trim();
   const link = /^!?\[\[([\s\S]*)\]\]$/.exec(s);
@@ -52,14 +45,6 @@ interface Bucket<V, E> {
   entries: Map<string, E>;
 }
 
-/**
- * Convierte los grupos que devuelve Bases (una nota por grupo combinado) en
- * grupos divididos: la nota aparece en todos los grupos que nombra su lista.
- *
- * @param groups   grupos originales de Bases
- * @param ordered  entradas sin agrupar, ya ordenadas por el Base (define el orden dentro de cada grupo)
- * @param make     crea un grupo nuevo a partir de uno existente (mismo prototipo)
- */
 export function splitGroups<V, E, G extends GroupLike<V, E>>(
   groups: G[],
   ordered: E[],
@@ -68,7 +53,6 @@ export function splitGroups<V, E, G extends GroupLike<V, E>>(
   opts: SplitOptions,
   make: (template: G, key: V | undefined, entries: E[]) => G,
 ): G[] {
-  // Camino rápido: si ningún grupo tiene clave de lista no hay nada que dividir.
   if (!groups.some((g) => g.key !== undefined && ad.isList(g.key))) return groups;
 
   const position = new Map<string, number>();
@@ -78,15 +62,16 @@ export function splitGroups<V, E, G extends GroupLike<V, E>>(
   const noValue = new Map<string, E>();
   let noValueKey: V | undefined;
   let hasNoValueKey = false;
+  let sawNoValueGroup = false;
   let counter = 0;
 
-  const addTo = (id: string, key: V, label: string, e: E) => {
+  const ensure = (id: string, key: V, label: string): Bucket<V, E> => {
     let b = buckets.get(id);
     if (!b) {
       b = { key, label, firstSeen: counter++, entries: new Map() };
       buckets.set(id, b);
     }
-    b.entries.set(pathOf(e), e); // el mismo valor dos veces en una nota cuenta una sola vez
+    return b;
   };
 
   const addNoValue = (g: G) => {
@@ -100,6 +85,7 @@ export function splitGroups<V, E, G extends GroupLike<V, E>>(
         noValueKey = key;
         hasNoValueKey = true;
       }
+      sawNoValueGroup = true;
       addNoValue(g);
       continue;
     }
@@ -111,7 +97,8 @@ export function splitGroups<V, E, G extends GroupLike<V, E>>(
     }
     for (const p of usable) {
       const id = normalizeKey(ad.text(p), opts.caseInsensitive);
-      for (const e of g.entries) addTo(id, p, ad.text(p), e);
+      const b = ensure(id, p, ad.text(p));
+      for (const e of g.entries) b.entries.set(pathOf(e), e);
     }
   }
 
@@ -130,7 +117,7 @@ export function splitGroups<V, E, G extends GroupLike<V, E>>(
       list.sort((a, b) => a.entries.size - b.entries.size || collator.compare(a.label, b.label));
       break;
     default:
-      list.sort((a, b) => a.firstSeen - b.firstSeen); // orden nativo de Bases
+      list.sort((a, b) => a.firstSeen - b.firstSeen);
   }
 
   const inBaseOrder = (m: Map<string, E>): E[] =>
@@ -140,6 +127,6 @@ export function splitGroups<V, E, G extends GroupLike<V, E>>(
 
   const template = groups[0];
   const out = list.map((b) => make(template, b.key, inBaseOrder(b.entries)));
-  if (noValue.size > 0) out.push(make(template, noValueKey, inBaseOrder(noValue)));
+  if (noValue.size > 0 || sawNoValueGroup) out.push(make(template, noValueKey, inBaseOrder(noValue)));
   return out;
 }

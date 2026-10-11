@@ -1,7 +1,7 @@
 {
   "id": "native-split-groups",
   "name": "Native Split Groups",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "minAppVersion": "1.10.2",
   "description": "In native Bases views, a note appears for each option in its list property, rather than in a merged group.",
   "author": "Bea Karnstein",

@@ -20,7 +20,7 @@ const en = {
 
   sortName: "Group order",
   sortDesc:
-    "\"Obsidian's order\" follows the choice in the Group menu. Notes inside each group keep the base's order.",
+    "\"Obsidian's order\" follows the choice in the Group menu. Manual order overrides any other option. Notes inside each group keep the base's order.",
   sortNative: "Obsidian's order",
   sortMost: "Most notes first",
   sortFewest: "Fewest notes first",
@@ -59,7 +59,7 @@ const es: Record<TKey, string> = {
 
   sortName: "Orden de los grupos",
   sortDesc:
-    "\"Orden de Obsidian\" sigue la opción del menú Grupo. Las notas dentro de cada grupo mantienen el orden de la base.",
+    "\"Orden de Obsidian\" sigue la opción del menú Grupo. El orden Manual sobreescribe cualquier otra opción. Las notas dentro de cada grupo mantienen el orden de la base.",
   sortNative: "Orden de Obsidian",
   sortMost: "Más notas primero",
   sortFewest: "Menos notas primero",

@@ -35,18 +35,18 @@ function isProbe(fn: unknown): fn is (this: object) => unknown {
 }
 
 function dataValue(obj: object, key: string): unknown {
-  const d = Object.getOwnPropertyDescriptor(obj, key);
+  const d: { value?: unknown; get?: (this: object) => unknown } | undefined = Object.getOwnPropertyDescriptor(obj, key);
   if (!d) return undefined;
-  if ("value" in d) return d.value as unknown;
+  if ("value" in d) return d.value;
   return isProbe(d.get) ? d.get.call(obj) : undefined;
 }
 
 function dataProps(obj: object): Array<[string, unknown]> {
   const out: Array<[string, unknown]> = [];
   for (const key of Object.getOwnPropertyNames(obj)) {
-    const d = Object.getOwnPropertyDescriptor(obj, key);
+    const d: { value?: unknown; get?: (this: object) => unknown } | undefined = Object.getOwnPropertyDescriptor(obj, key);
     if (!d) continue;
-    if ("value" in d) out.push([key, d.value as unknown]);
+    if ("value" in d) out.push([key, d.value]);
     else if (isProbe(d.get)) out.push([key, d.get.call(obj)]);
   }
   return out;
@@ -86,19 +86,23 @@ export function readGroupOrder(root: object, path: readonly string[]): unknown {
 }
 
 export function hideGroupOrder(root: object, path: readonly string[]): object {
+  let stash: unknown;
   const wrap = (obj: object, depth: number): object =>
     new Proxy(obj, {
       get(target, prop, receiver): unknown {
         if (depth === path.length && prop === "groupOrder") return undefined;
+        if (depth === 0 && prop === "groupedDataCache") return stash;
         const value: unknown = Reflect.get(target, prop, receiver);
         if (depth < path.length && prop === path[depth] && isObj(value)) return wrap(value, depth + 1);
         return value;
       },
       has(target, prop): boolean {
         if (depth === path.length && prop === "groupOrder") return false;
+        if (depth === 0 && prop === "groupedDataCache") return stash !== undefined;
         return Reflect.has(target, prop);
       },
-      set(): boolean {
+      set(_target, prop, value): boolean {
+        if (depth === 0 && prop === "groupedDataCache") stash = value;
         return true;
       },
       defineProperty(): boolean {

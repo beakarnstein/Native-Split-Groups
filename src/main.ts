@@ -23,7 +23,6 @@ import { makeT } from "./i18n";
 import { describeShape, findGroupOrderPath, hideGroupOrder, holderAt, installProbe, readGroupOrder } from "./config";
 import { NO_VALUE, applyGroupOrder, listHoldsKey, menuGroups, parseGroupOrder, withEmptyColumns } from "./order";
 
-/** Translates interface strings using the Obsidian app language (English by default). */
 const t = makeT(() => getLanguage());
 
 interface Settings {
@@ -156,8 +155,14 @@ function hasGroupedDataAccessor(proto: unknown): proto is object {
   return !!desc && typeof desc.get === "function";
 }
 
+interface AccessorLike {
+  configurable?: boolean;
+  enumerable?: boolean;
+  get?: (this: unknown) => unknown;
+}
+
 function descriptorOf(proto: object): TypedDescriptor | undefined {
-  const desc = Object.getOwnPropertyDescriptor(proto, "groupedData");
+  const desc: AccessorLike | undefined = Object.getOwnPropertyDescriptor(proto, "groupedData");
   if (typeof desc?.get !== "function") return undefined;
   const get = desc.get;
   return {
@@ -335,6 +340,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
   private resultIds = new WeakMap<object, number>();
   private nextResultId = 1;
   private probeLog: ProbeEntry[] = [];
+  private dragLog: unknown[] = [];
   private probed = new WeakSet<object>();
   private selfReads = 0;
   private matchDepth = 0;
@@ -422,7 +428,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
         const lists = this.snapshotLists(frontmatter);
         const ret = fn(frontmatter);
         try {
-          this.applyDragToFrontmatter(frontmatter, lists);
+          this.applyDragToFrontmatter(frontmatter, lists, isRecord(file) && typeof file.path === "string" ? file.path : "?");
         } catch (err) {
           console.error("[native-split-groups] error en el modo de arrastre; se deja la escritura original", err);
         }
@@ -456,7 +462,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     return d.end >= d.start && now - d.end <= 3000 && now - d.start <= 60000;
   }
 
-  private applyDragToFrontmatter(frontmatter: Frontmatter, lists: Record<string, unknown[]>) {
+  private applyDragToFrontmatter(frontmatter: Frontmatter, lists: Record<string, unknown[]>, fileName: string) {
     const ci = this.settings.caseInsensitive;
     for (const key of Object.keys(lists)) {
       const before = lists[key];
@@ -468,11 +474,18 @@ export default class NativeSplitGroupsPlugin extends Plugin {
       if (!res) continue;
 
       frontmatter[key] = res.value;
+      this.logDrag({ file: fileName, levels: this.drag?.levels, mode: this.settings.dragMode, key, before, nativeWrote: after, origin, finalValue: res.value, fallback: res.fallback });
       console.debug("[native-split-groups] arrastre en", key, { before, after, origin, result: res.value });
       if (res.fallback) {
         new Notice(t("noticeSourceNotFound"));
       }
     }
+  }
+
+  private logDrag(entry: Record<string, unknown>) {
+    if (!this.settings.debug) return;
+    this.dragLog.push({ at: new Date().toISOString(), ...entry });
+    if (this.dragLog.length > 20) this.dragLog.shift();
   }
 
   private onDragStart(ev: Event) {
@@ -511,7 +524,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
   private tryPatch() {
     const viewsPatched = this.tryPatchViews();
     if (this.patchedProto) {
-      const current = Object.getOwnPropertyDescriptor(this.patchedProto, "groupedData");
+      const current: AccessorLike | undefined = Object.getOwnPropertyDescriptor(this.patchedProto, "groupedData");
       if (current?.get === this.patchedGetter) {
         if (viewsPatched) this.refreshBases();
         return;
@@ -583,6 +596,14 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     });
   }
 
+  dropSettledMove(view: KanbanLike, args: unknown[]) {
+    const pending = args[0];
+    if (!isRecord(pending) || !isRecord(pending.entry)) return;
+    const file = pending.entry.file;
+    const target = view.orderedGroups?.find((g) => this.keyNorm(g.key) === this.keyNorm(pending.targetKey as Value | undefined));
+    if (target && Array.isArray(target.entries) && target.entries.some((e) => e.file === file)) args[0] = null;
+  }
+
   private keyNorm(key: Value | undefined): string {
     return key === undefined || isNullValue(key) ? NO_VALUE : normalizeKey(valueText(key), this.settings.caseInsensitive);
   }
@@ -629,7 +650,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
       this.wrapMethod(controller, "notifyView", function (this: unknown, original, args) {
         plugin.matchDepth++;
         try {
-          return Reflect.apply(original, this, args) as unknown;
+          return Reflect.apply(original, this, args);
         } finally {
           plugin.matchDepth--;
         }
@@ -643,7 +664,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
             console.error("[native-split-groups] Error en la lista del menú Group, se usa la de Obsidian", err);
           }
         }
-        return Reflect.apply(original, this, args) as unknown;
+        return Reflect.apply(original, this, args);
       });
       changed = true;
     }
@@ -656,11 +677,12 @@ export default class NativeSplitGroupsPlugin extends Plugin {
             const view = this as KanbanLike;
             const columns = plugin.kanbanColumns(view);
             if (columns) view.orderedGroups = columns;
+            plugin.dropSettledMove(view, args);
           } catch (err) {
             console.error("[native-split-groups] Error en las columnas del kanban, se usan las de Obsidian", err);
           }
         }
-        return Reflect.apply(original, this, args) as unknown;
+        return Reflect.apply(original, this, args);
       });
       changed = true;
     }
@@ -710,7 +732,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     const plugin = bind(this);
     const original = proto.looseEquals as (this: unknown, other: unknown) => boolean;
     const wrapper = function (this: unknown, other: unknown): boolean {
-      const result = Reflect.apply(original, this, [other]) as boolean;
+      const result = Reflect.apply(original, this, [other]);
       if (result || plugin.matchDepth === 0 || !plugin.settings.enabled) return result;
       return plugin.listHolds(this, other);
     };
@@ -948,6 +970,8 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     lines.push(JSON.stringify(Object.fromEntries(this.internals), null, 1));
     lines.push("--- reads/writes of groupOrder and groupedDataCache (oldest first) ---");
     lines.push(JSON.stringify(this.probeLog.map(({ ...e }) => ({ ...e, fp: undefined })), null, 1));
+    lines.push("--- Kanban drag writes (oldest first) ---");
+    lines.push(JSON.stringify(this.dragLog, null, 1));
     lines.push("--- groupedData calls (oldest first; repeat = identical consecutive calls) ---");
     lines.push(JSON.stringify(this.diagLog, null, 1));
     return lines.join("\n");
@@ -959,7 +983,6 @@ export default class NativeSplitGroupsPlugin extends Plugin {
       await navigator.clipboard.writeText(report);
       new Notice(t("noticeDiagCopied"));
     } catch {
-      console.info(report);
       new Notice(t("noticeDiagFailed"));
     }
   }

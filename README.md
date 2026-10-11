@@ -18,6 +18,10 @@ The plugin settings include an option to control how a note behaves when dragged
 
 Copy `main.js` and `manifest.json` to 'native-split-groups' inside your plugins folder. Reload the program and enable the plugin under Settings → Community plugins.
 
+## Reporting a problem
+
+Turn on **Diagnostics** in the plugin settings, reproduce the problem (for example, reorder the groups), then run the command **Copy diagnostics** and paste the result into an issue. It contains the Obsidian version, the plugin settings, the text of the open `.base` files and a short log of the groups Obsidian handed to the plugin (key, type and number of notes per group; no note contents). Review it before sharing. Turn Diagnostics off afterwards.
+
 ## Languages
 
 The plugin interface (settings, command and notices) is available in English and Spanish. It follows the language of Obsidian (Settings → General → Language): Spanish when the app is set to Spanish, English otherwise.

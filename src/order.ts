@@ -56,6 +56,10 @@ export function menuGroups<V>(
   order: OrderEntry[],
   ad: ValueAdapter<V>,
   caseInsensitive: boolean,
+  /** Opciones que existen en la propiedad aunque ninguna nota visible las tenga (cuenta 0). */
+  extras: ReadonlyArray<{ key: V; label: string }> = [],
+  /** Ofrece también el grupo «sin valor» (None) aunque ninguna nota visible lo use. */
+  includeNone = false,
 ): MenuGroup<V>[] {
   const seen = new Map<string, { key: V | null; label: string | null; count: number }>();
   const add = (norm: string, key: V | null, label: string | null) => {
@@ -83,6 +87,14 @@ export function menuGroups<V>(
       else add(k, v, ad.text(v));
     }
   }
+  for (const x of extras) {
+    const k = normalizeKey(x.label, caseInsensitive);
+    if (k === "") continue;
+    const s = seen.get(k);
+    if (!s) seen.set(k, { key: x.key, label: x.label, count: 0 });
+  }
+  const addedNone = includeNone && !seen.has(NO_VALUE);
+  if (addedNone) seen.set(NO_VALUE, { key: null, label: null, count: 0 });
   const visible: MenuGroup<V>[] = [];
   const listed = new Set<string>();
   for (const o of order) {
@@ -96,6 +108,10 @@ export function menuGroups<V>(
     .filter(([k]) => !listed.has(k))
     .map(([, s]) => ({ key: s.key, label: s.label, count: s.count, isVisible: false }))
     .sort((a, b) => collator.compare(a.label ?? "", b.label ?? ""));
+  if (addedNone) {
+    const i = hidden.findIndex((h) => h.label === null);
+    if (i >= 0) hidden.push(...hidden.splice(i, 1)); // None al final de los ocultos
+  }
   return visible.concat(hidden);
 }
 

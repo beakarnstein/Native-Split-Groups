@@ -6,10 +6,9 @@ import { normalizeKey } from "./split";
 export type DragMode = "replace-all" | "add" | "replace-origin";
 
 export interface DragResult {
-  /** Lista que debe quedar en la nota. */
   value: unknown[];
-  /** true si se seleccionó "reemplazar origen" pero no se pudo saber el origen: se usa "agregar". */
   fallback: boolean;
+  blank?: boolean;
 }
 
 const items = (v: unknown): unknown[] => {
@@ -84,4 +83,20 @@ export function applyDragMode(
   if (beforeKeys[oi] === inKey) return { value: [...before], fallback: false }; // soltada en su propia columna
   if (already) return { value: before.filter((_, i) => i !== oi), fallback: false };
   return { value: before.map((x, i) => (i === oi ? incoming : x)), fallback: false };
+}
+/**
+ * Arrastre a la columna «sin valor» (None): Obsidian borra la propiedad de la nota.
+ *  - replace-all:    la propiedad queda en blanco (no se borra)
+ *  - add:            no se cambia nada
+ *  - replace-origin: se quita solo el valor de la columna de origen y se conserva el resto
+ * @returns null si no hay que intervenir
+ */
+export function applyDragToNone(mode: DragMode, before: unknown[], origin: unknown, ci = true): DragResult | null {
+  if (before.length === 0) return null;
+  if (mode === "replace-all") return { value: [], fallback: false, blank: true };
+  if (mode === "add") return { value: [...before], fallback: false };
+  const oi = origin === undefined ? -1 : before.map((b) => keyOf(b, ci)).indexOf(keyOf(origin, ci));
+  if (oi < 0) return { value: [...before], fallback: true };
+  const rest = before.filter((_, i) => i !== oi);
+  return { value: rest, fallback: false, blank: rest.length === 0 };
 }

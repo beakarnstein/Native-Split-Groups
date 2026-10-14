@@ -18,7 +18,7 @@ import {
   WorkspaceLeaf,
 } from "obsidian";
 import { ValueAdapter, normalizeKey, splitGroups } from "./split";
-import { DragMode, applyDragMode, isListToSingleValue, matchOrigin } from "./drag";
+import { DragMode, applyDragMode, applyDragToNone, isListToSingleValue, matchOrigin } from "./drag";
 import { makeT } from "./i18n";
 import { describeShape, findGroupOrderPath, hideGroupOrder, holderAt, installProbe, readGroupOrder } from "./config";
 import { NO_VALUE, applyGroupOrder, listHoldsKey, menuGroups, parseGroupOrder, withEmptyColumns } from "./order";
@@ -41,9 +41,17 @@ const DEFAULTS: Settings = {
   debug: false,
 };
 
+/** Clave con la que cada vista Kanban guarda su modo de arrastre en el archivo .base. */
+const VIEW_DRAG_KEY = "splitGroupsDragMode";
+/** Opción por vista: listar en el menú Group todas las opciones de la propiedad (solo con orden manual). */
+const VIEW_ALL_OPTIONS_KEY = "splitGroupsAllOptions";
 const BASES_CONTAINER = '.bases-view, .bases-embed, .workspace-leaf-content[data-type="bases"]';
 
 interface DragState {
+  /** Vista Kanban de origen (para cancelar su movimiento provisional). */
+  view: Record<string, unknown> | null;
+  /** Modo de arrastre que rige en la vista Kanban de origen. */
+  mode: DragMode;
   start: number;
   end: number;
   levels: string[][];
@@ -108,6 +116,20 @@ function isDragMode(v: unknown): v is DragMode {
 
 function isSettingsKey(v: string): v is keyof Settings {
   return v === "enabled" || v === "caseInsensitive" || v === "sortMode" || v === "dragMode" || v === "debug";
+}
+
+/** Deja las propiedades en el orden original: la que se modificó vuelve a su sitio en vez de ir al final. */
+function restoreKeyOrder(fm: Record<string, unknown>, order: string[]) {
+  const current = Object.keys(fm);
+  const final = [...order.filter((k) => current.includes(k)), ...current.filter((k) => !order.includes(k))];
+  if (final.every((k, i) => k === current[i])) return;
+  const values = new Map(current.map((k) => [k, fm[k]] as const));
+  for (const k of current) delete fm[k];
+  for (const k of final) fm[k] = values.get(k);
+}
+
+function sameList(a: unknown[], b: unknown[]): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -341,6 +363,12 @@ export default class NativeSplitGroupsPlugin extends Plugin {
   private nextResultId = 1;
   private probeLog: ProbeEntry[] = [];
   private dragLog: unknown[] = [];
+  private optionsPatched = false;
+  private optionsCache = new Map<string, Array<{ key: Value; label: string }>>();
+  /** Orden de las propiedades de la nota antes de escribir. */
+  private snapshotOrder: string[] = [];
+  /** Notas cuyo arrastre no cambió nada. */
+  private unchangedMoves = new Map<string, number>();
   private probed = new WeakSet<object>();
   private selfReads = 0;
   private matchDepth = 0;
@@ -353,6 +381,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     this.addSettingTab(new SplitSettingTab(this.app, this));
 
     this.patchProcessFrontMatter();
+    this.patchViewOptions();
     const onStart = (ev: Event) => this.onDragStart(ev);
     const onEnd = () => {
       if (this.drag) this.drag.end = Date.now();
@@ -384,6 +413,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     this.patchListMatching();
 
     const attempt = () => {
+      this.patchViewOptions();
       this.tryPatch();
       for (const delay of [300, 1000, 2500, 5000]) {
         window.setTimeout(() => {
@@ -392,12 +422,16 @@ export default class NativeSplitGroupsPlugin extends Plugin {
       }
     };
     this.app.workspace.onLayoutReady(attempt);
+    const dropOptions = () => this.optionsCache.clear();
+    this.registerEvent(this.app.metadataCache.on("changed", dropOptions));
+    this.registerEvent(this.app.metadataCache.on("deleted", dropOptions));
     this.registerEvent(this.app.workspace.on("layout-change", attempt));
     this.registerEvent(this.app.workspace.on("active-leaf-change", attempt));
   }
 
   onunload() {
     this.unloaded = true;
+    if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     for (const p of this.methodPatches) {
       if (p.proto[p.name] === p.wrapper) p.proto[p.name] = p.original;
     }
@@ -447,7 +481,9 @@ export default class NativeSplitGroupsPlugin extends Plugin {
 
   private snapshotLists(frontmatter: Frontmatter): Record<string, unknown[]> {
     const out: Record<string, unknown[]> = {};
-    if (this.settings.dragMode === "replace-all" || !this.dragIsRecent()) return out;
+    const mode = this.drag?.mode;
+    if (!mode || !this.dragIsRecent()) return out;
+    this.snapshotOrder = Object.keys(frontmatter);
     for (const key of Object.keys(frontmatter)) {
       const value = frontmatter[key];
       if (Array.isArray(value)) out[key] = value as unknown[];
@@ -464,22 +500,80 @@ export default class NativeSplitGroupsPlugin extends Plugin {
 
   private applyDragToFrontmatter(frontmatter: Frontmatter, lists: Record<string, unknown[]>, fileName: string) {
     const ci = this.settings.caseInsensitive;
+    const mode = this.drag?.mode;
+    if (!mode) return;
     for (const key of Object.keys(lists)) {
       const before = lists[key];
       const after = frontmatter[key];
-      if (!before || !isListToSingleValue(before, after, ci)) continue;
+      if (!before) continue;
+
+      // Arrastre a la columna «None»
+      if (after === undefined || !(key in frontmatter)) {
+        const origin = this.drag ? matchOrigin(this.drag.levels, before, ci) : undefined;
+        const res = applyDragToNone(mode, before, origin, ci);
+        if (!res) continue;
+        frontmatter[key] = res.blank ? null : res.value;
+        restoreKeyOrder(frontmatter, this.snapshotOrder);
+        if (!res.blank && sameList(before, res.value)) {
+          this.unchangedMoves.set(fileName, Date.now());
+          this.cancelPendingMove(fileName);
+        }
+        this.logDrag({ file: fileName, levels: this.drag?.levels, mode, key, before, nativeWrote: "(propiedad borrada)", origin, finalValue: res.blank ? null : res.value, fallback: res.fallback, viewFound: !!this.drag?.view, toNone: true, keysBefore: this.snapshotOrder, keysAfter: Object.keys(frontmatter) });
+        if (res.fallback) new Notice(t("noticeSourceNotFound"));
+        continue;
+      }
+
+      if (!isListToSingleValue(before, after, ci)) continue;
 
       const origin = this.drag ? matchOrigin(this.drag.levels, before, ci) : undefined;
-      const res = applyDragMode(this.settings.dragMode, before, after, origin, ci);
+      const res = applyDragMode(mode, before, after, origin, ci);
       if (!res) continue;
 
       frontmatter[key] = res.value;
-      this.logDrag({ file: fileName, levels: this.drag?.levels, mode: this.settings.dragMode, key, before, nativeWrote: after, origin, finalValue: res.value, fallback: res.fallback });
-      console.debug("[native-split-groups] arrastre en", key, { before, after, origin, result: res.value });
+      if (sameList(before, res.value)) {
+        this.unchangedMoves.set(fileName, Date.now());
+        this.cancelPendingMove(fileName);
+      }
+      this.logDrag({ file: fileName, levels: this.drag?.levels, mode, key, before, nativeWrote: after, origin, finalValue: res.value, fallback: res.fallback, viewFound: !!this.drag?.view });
+      if (this.settings.debug) console.debug("[native-split-groups] drag on", key, { before, after, origin, result: res.value });
       if (res.fallback) {
         new Notice(t("noticeSourceNotFound"));
       }
     }
+  }
+
+  private cancelPendingMove(path: string) {
+    for (const delay of [50, 250, 800]) {
+      window.setTimeout(() => {
+        if (this.unloaded) return;
+        const views = this.kanbanViews();
+        let cleared = 0;
+        for (const view of views) {
+          const pending = view.pendingMove;
+          if (!isRecord(pending) || !isRecord(pending.entry)) continue;
+          const file = pending.entry.file;
+          if (!isRecord(file) || file.path !== path) continue;
+          view.pendingMove = null;
+          cleared++;
+          if (isFn(view.display)) Reflect.apply(view.display as (...args: unknown[]) => unknown, view, []);
+          else if (isFn(view.updateVirtualDisplay)) Reflect.apply(view.updateVirtualDisplay as (...args: unknown[]) => unknown, view, []);
+        }
+        this.logDrag({ file: path, cancelTry: delay, kanbanViews: views.length, cleared });
+      }, delay);
+    }
+  }
+
+  /** Todas las vistas Kanban abiertas en pestañas. */
+  private kanbanViews(): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [];
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view.getViewType() !== "bases") return;
+      this.scanFor(leaf.view, (proto, obj) => {
+        if (isRecord(proto) && isFn(proto.finishDisplay) && isFn(proto.renderColumns)) out.push(obj);
+        return false;
+      });
+    });
+    return out;
   }
 
   private logDrag(entry: Record<string, unknown>) {
@@ -489,14 +583,92 @@ export default class NativeSplitGroupsPlugin extends Plugin {
   }
 
   private onDragStart(ev: Event) {
-    if (this.settings.dragMode === "replace-all") return;
     const target = ev.target instanceof Element ? ev.target : null;
     const container = target?.closest(BASES_CONTAINER) ?? null;
-    if (!target || !container) {
+    // Solo el Kanban reescribe la propiedad al arrastrar.
+    if (!target || !container || !target.closest(".bases-kanban-container")) {
       this.drag = null;
       return;
     }
-    this.drag = { start: Date.now(), end: 0, levels: this.captureLevels(target, container) };
+    const { mode, view } = this.modeForTarget(target);
+    this.drag = { mode, view, start: Date.now(), end: 0, levels: this.captureLevels(target, container) };
+  }
+
+  // ---- Modo de arrastre por vista --------------------------------------------
+
+  /** Añade la opción «arrastre de tarjetas» a los ajustes de las vistas Kanban de Obsidian. */
+  private patchViewOptions() {
+    if (this.optionsPatched || this.unloaded) return;
+    const app: unknown = this.app;
+    const internals = isRecord(app) ? app.internalPlugins : undefined;
+    if (!isRecord(internals) || typeof internals.getEnabledPluginById !== "function") return;
+    const bases = Reflect.apply(internals.getEnabledPluginById as (...args: unknown[]) => unknown, internals, ["bases"]) as unknown;
+    if (!isRecord(bases) || typeof bases.getRegistration !== "function") return;
+    const entry = Reflect.apply(bases.getRegistration as (...args: unknown[]) => unknown, bases, ["kanban"]) as unknown;
+    if (!isRecord(entry) || typeof entry.options !== "function") return;
+    const original = entry.options as (...args: unknown[]) => unknown;
+    const wrapper = (...args: unknown[]): unknown => {
+      const base = Reflect.apply(original, entry, args) as unknown;
+      const list: unknown[] = Array.isArray(base) ? (base as unknown[]) : [];
+      return [...list, this.dragViewOption(), this.allOptionsOption()];
+    };
+    entry.options = wrapper;
+    this.optionsPatched = true;
+    this.register(() => {
+      if (entry.options === wrapper) entry.options = original;
+      this.optionsPatched = false;
+    });
+  }
+
+  private allOptionsOption(): Record<string, unknown> {
+    return {
+      displayName: t("allOptionsName"),
+      type: "toggle",
+      key: VIEW_ALL_OPTIONS_KEY,
+      default: false,
+      shouldHide: (cfg: unknown) => !(isRecord(cfg) && Boolean(cfg.groupOrder)),
+    };
+  }
+
+  private dragViewOption(): Record<string, unknown> {
+    return {
+      displayName: t("dragViewName"),
+      type: "dropdown",
+      key: VIEW_DRAG_KEY,
+      options: {
+        "": t("dragViewDefault"),
+        "replace-all": t("dragReplaceAll"),
+        add: t("dragAdd"),
+        "replace-origin": t("dragReplaceOrigin"),
+      },
+    };
+  }
+
+  private modeForTarget(target: Element): { mode: DragMode; view: Record<string, unknown> | null } {
+    const fallback = this.settings.dragMode;
+    let config: unknown;
+    let found: Record<string, unknown> | null = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (config !== undefined || leaf.view.getViewType() !== "bases") return;
+      const host: unknown = leaf.view;
+      const root = isRecord(host) ? host.containerEl : undefined;
+      if (!(root instanceof HTMLElement) || !root.contains(target)) return;
+      this.scanFor(leaf.view, (proto, obj) => {
+        if (!isRecord(proto) || !isFn(proto.finishDisplay) || !isFn(proto.renderColumns)) return false;
+        const el = obj.containerEl;
+        if (!(el instanceof HTMLElement) || !el.contains(target)) return false;
+        config = obj.config;
+        found = obj;
+        return true;
+      });
+    });
+    if (!isRecord(config) || typeof config.get !== "function") return { mode: fallback, view: found };
+    try {
+      const value = Reflect.apply(config.get as (...args: unknown[]) => unknown, config, [VIEW_DRAG_KEY]) as unknown;
+      return { mode: isDragMode(value) ? value : fallback, view: found };
+    } catch {
+      return { mode: fallback, view: found };
+    }
   }
 
   private captureLevels(target: Element, container: Element): string[][] {
@@ -526,7 +698,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     if (this.patchedProto) {
       const current: AccessorLike | undefined = Object.getOwnPropertyDescriptor(this.patchedProto, "groupedData");
       if (current?.get === this.patchedGetter) {
-        if (viewsPatched) this.refreshBases();
+        if (viewsPatched) this.refreshBasesLater();
         return;
       }
       this.patchedProto = null;
@@ -579,8 +751,8 @@ export default class NativeSplitGroupsPlugin extends Plugin {
       get,
     });
 
-    console.debug("[native-split-groups] Parche aplicado a BasesQueryResult.groupedData");
-    this.refreshBases();
+    if (this.settings.debug) console.debug("[native-split-groups] patched BasesQueryResult.groupedData");
+    this.refreshBasesLater();
   }
 
   private split(result: object, groups: BasesEntryGroup[]): BasesEntryGroup[] {
@@ -600,6 +772,16 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     const pending = args[0];
     if (!isRecord(pending) || !isRecord(pending.entry)) return;
     const file = pending.entry.file;
+    // Si el arrastre no cambió la nota, la tarjeta no se mueve.
+    const path = isRecord(file) && typeof file.path === "string" ? file.path : undefined;
+    const stamp = path ? this.unchangedMoves.get(path) : undefined;
+    if (path && stamp !== undefined) {
+      this.unchangedMoves.delete(path);
+      if (Date.now() - stamp < 10000) {
+        args[0] = null;
+        return;
+      }
+    }
     const target = view.orderedGroups?.find((g) => this.keyNorm(g.key) === this.keyNorm(pending.targetKey as Value | undefined));
     if (target && Array.isArray(target.entries) && target.entries.some((e) => e.file === file)) args[0] = null;
   }
@@ -775,11 +957,52 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     if (!order || !entries) return null;
     const values = this.groupValues(entries, config.groupBy.property);
     if (!values) return null;
-    return menuGroups(values, order, adapter, this.settings.caseInsensitive).map((row) => ({
+    const config2 = config as { get?: unknown };
+    let showAll = false;
+    try {
+      if (typeof config2.get === "function") showAll = Reflect.apply(config2.get as (...args: unknown[]) => unknown, config, [VIEW_ALL_OPTIONS_KEY]) === true;
+    } catch {
+      showAll = false;
+    }
+    const extras = showAll ? this.vaultOptions(config.groupBy.property) : [];
+    return menuGroups(values, order, adapter, this.settings.caseInsensitive, extras, showAll).map((row) => ({
       key: row.key ?? this.keyFor(row.label),
       count: row.count,
       isVisible: row.isVisible,
     }));
+  }
+
+  /**
+   * Valores distintos que usa la propiedad en todo el vault.
+   */
+  private vaultOptions(property: unknown): Array<{ key: Value; label: string }> {
+    if (typeof property !== "string") return [];
+    const name = property.startsWith("note.") ? property.slice(5) : property;
+    if (name.startsWith("file.") || name.startsWith("formula.")) return [];
+    const cached = this.optionsCache.get(name);
+    if (cached) return cached;
+    const ci = this.settings.caseInsensitive;
+    const wanted = name.toLowerCase();
+    const found = new Map<string, string>();
+    const add = (raw: unknown) => {
+      if (typeof raw !== "string" && typeof raw !== "number") return;
+      const label = String(raw).trim();
+      const norm = normalizeKey(label, ci);
+      if (norm !== "" && !found.has(norm)) found.set(norm, label);
+    };
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      if (!fm) continue;
+      for (const key of Object.keys(fm)) {
+        if (key.toLowerCase() !== wanted) continue;
+        const value: unknown = fm[key];
+        if (Array.isArray(value)) value.forEach(add);
+        else add(value);
+      }
+    }
+    const out = [...found.values()].map((label) => ({ key: this.keyFor(label), label }));
+    this.optionsCache.set(name, out);
+    return out;
   }
 
   private kanbanColumns(view: KanbanLike): BasesEntryGroup[] | null {
@@ -954,6 +1177,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
 
   private async buildReport(): Promise<string> {
     const lines: string[] = [];
+    lines.push(`build: none-drag-4`);
     lines.push(`native-split-groups ${this.manifest.version} · Obsidian API ${apiVersion} · language ${getLanguage()}`);
     lines.push(`settings: ${JSON.stringify(this.settings)}`);
     lines.push(`getter still patched: ${this.patchedProto !== null}`);
@@ -1026,18 +1250,53 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     return null;
   }
 
-  refreshBases() {
+  private refreshTimer: number | null = null;
+
+
+  /**
+   * Redibuja las bases abiertas.
+   */
+  refreshBasesLater(done: WeakSet<object> = new WeakSet(), attempt = 0) {
+    if (this.unloaded) return;
+    if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
+    this.refreshTimer = window.setTimeout(() => {
+      this.refreshTimer = null;
+      if (this.unloaded) return;
+      if (this.refreshBases(done) && attempt < 4) this.refreshBasesLater(done, attempt + 1);
+    }, attempt === 0 ? 600 : 500);
+  }
+
+  /** Devuelve true si alguna base todavía se está abriendo (queda pendiente para reintentar). */
+  refreshBases(done: WeakSet<object> = new WeakSet()): boolean {
+    let pending = false;
     this.app.workspace.iterateAllLeaves((leaf: WorkspaceLeaf) => {
       if (leaf.view.getViewType() !== "bases") return;
+      // Las pestañas sin cargar se dibujan ya parcheadas cuando se abren.
+      if ((leaf as { isDeferred?: boolean }).isDeferred) return;
+      if (done.has(leaf)) return;
+      const view: unknown = leaf.view;
+      const container: unknown = isRecord(view) ? view.containerEl : undefined;
+      const loaded = fileOfView(view) instanceof TFile && container instanceof HTMLElement && container.isConnected;
+      if (!loaded) {
+        pending = true;
+        return;
+      }
+      done.add(leaf);
+      // Solo hace falta redibujar lo que muestra grupos.
+      if (!container.querySelector(GROUPED_SELECTOR)) return;
       const rebuild = leaf as LeafRebuild;
       if (typeof rebuild.rebuildView === "function") {
         void rebuild.rebuildView();
-      } else {
+      } else if (leaf.getViewState().type === "bases") {
         void leaf.setViewState(leaf.getViewState());
       }
     });
+    return pending;
   }
 }
+
+const GROUPED_SELECTOR =
+  ".bases-kanban-container, .bases-cards-group, .bases-list-group, .bases-group-heading, .bases-group-row";
 
 class SplitSettingTab extends PluginSettingTab {
   constructor(app: App, private plugin: NativeSplitGroupsPlugin) {

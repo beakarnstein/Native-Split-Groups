@@ -26,8 +26,12 @@ const en = {
   sortFewest: "Fewest notes first",
 
   dragHeading: "Kanban drag",
-  dragName: "What to do with the list when a card moves to another column",
-  dragDesc: "If the card's source column cannot be determined, option 3 behaves like option 2.",
+  dragName: "Default for new Kanban views",
+  dragDesc:
+    "What to do with the list when a card moves to another column. Each Kanban view can override this in its own view settings (\"Split Groups: card drag\"). If the card's source column cannot be determined, option 3 behaves like option 2.",
+  allOptionsName: "Split Groups: list all property options in the Group menu",
+  dragViewName: "Split Groups: card drag",
+  dragViewDefault: "Plugin default",
   dragReplaceAll: "1. Replace everything with the new column",
   dragAdd: "2. Add the new column to the previous ones",
   dragReplaceOrigin: "3. Replace the source column with the new column",
@@ -65,8 +69,12 @@ const es: Record<TKey, string> = {
   sortFewest: "Menos notas primero",
 
   dragHeading: "Arrastre en kanban",
-  dragName: "Qué hacer con la lista al mover una tarjeta de columna",
-  dragDesc: "Si no se puede saber de qué columna salió la tarjeta, la opción 3 se comporta como la 2.",
+  dragName: "Valor por defecto para Kanban",
+  dragDesc:
+    "Qué hacer con la lista al mover una tarjeta de columna. Cada Kanban puede cambiarlo en sus propios ajustes de vista (\"Split Groups: arrastre de tarjetas\"). Si no se puede saber de qué columna salió la tarjeta, la opción 3 se comporta como la 2.",
+  allOptionsName: "Split Groups: listar en el menú Group todas las opciones de la propiedad",
+  dragViewName: "Split Groups: arrastre de tarjetas",
+  dragViewDefault: "Predeterminado del plugin",
   dragReplaceAll: "1. Sustituir todo por la columna nueva",
   dragAdd: "2. Agregar la columna nueva a las anteriores",
   dragReplaceOrigin: "3. Reemplazar columna de origen por columna nueva",

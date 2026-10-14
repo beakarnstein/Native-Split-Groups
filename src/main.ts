@@ -602,13 +602,13 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     const app: unknown = this.app;
     const internals = isRecord(app) ? app.internalPlugins : undefined;
     if (!isRecord(internals) || typeof internals.getEnabledPluginById !== "function") return;
-    const bases = Reflect.apply(internals.getEnabledPluginById as (...args: unknown[]) => unknown, internals, ["bases"]) as unknown;
+    const bases: unknown = Reflect.apply(internals.getEnabledPluginById as (...args: unknown[]) => unknown, internals, ["bases"]);
     if (!isRecord(bases) || typeof bases.getRegistration !== "function") return;
-    const entry = Reflect.apply(bases.getRegistration as (...args: unknown[]) => unknown, bases, ["kanban"]) as unknown;
+    const entry: unknown = Reflect.apply(bases.getRegistration as (...args: unknown[]) => unknown, bases, ["kanban"]);
     if (!isRecord(entry) || typeof entry.options !== "function") return;
     const original = entry.options as (...args: unknown[]) => unknown;
     const wrapper = (...args: unknown[]): unknown => {
-      const base = Reflect.apply(original, entry, args) as unknown;
+      const base: unknown = Reflect.apply(original, entry, args);
       const list: unknown[] = Array.isArray(base) ? (base as unknown[]) : [];
       return [...list, this.dragViewOption(), this.allOptionsOption()];
     };
@@ -664,7 +664,7 @@ export default class NativeSplitGroupsPlugin extends Plugin {
     });
     if (!isRecord(config) || typeof config.get !== "function") return { mode: fallback, view: found };
     try {
-      const value = Reflect.apply(config.get as (...args: unknown[]) => unknown, config, [VIEW_DRAG_KEY]) as unknown;
+      const value: unknown = Reflect.apply(config.get as (...args: unknown[]) => unknown, config, [VIEW_DRAG_KEY]);
       return { mode: isDragMode(value) ? value : fallback, view: found };
     } catch {
       return { mode: fallback, view: found };

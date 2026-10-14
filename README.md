@@ -9,10 +9,30 @@ For example, a note with a "Genre" list property where both "Comedy" and "Romanc
 2. In any Base, use **Group by** with a list property.
 3. The groups will automatically split based on the available options for the list property.
 
-The plugin settings include an option to control how a note behaves when dragged between columns in the Kanban view (native view). The options are:
-  1. *Replace everything with the new column*: the list is left with only the option corresponding to the column to which the note was dragged.
-  2. *Add the new column to the previous ones*: the new column is added as an option at the end of the property, without affecting the previously selected options.
-  3. *Replace the source column with the new column*: the value of the column from which the note is being dragged is removed, the new value is inserted, and the remaining options remain intact. If the source column cannot be determined, it behaves like option 2 and shows a notice (without deleting the remaining options).
+### Kanban drag
+
+##### General
+When you drag a card to another column in a Kanban view, Obsidian replaces the whole list with the column you dropped it on. This plugin lets you choose what happens instead:
+
+1. *Replace everything with the new column*: the list is left with only the option of the column the note was dropped on (Obsidian's default).
+2. *Add the new column to the previous ones*: the new option is added at the end of the list, without affecting the options already selected.
+3. *Replace the source column with the new column*: the value of the column the note was dragged from is removed, the new value is inserted, and the remaining options stay intact. If the source column cannot be determined, it behaves like option 2 and shows a notice.
+
+##### Individual Kanban Views
+You can choose this per Kanban view: open the view's settings and use **Split Groups: card drag**. Each view stores its choice in the `.base` file. *Plugin default* uses the value from the plugin settings, which is also the value used for new views and for Kanban views embedded in notes.
+
+##### 'None' Group
+Dropping a card on the 'None' column (no value):
+
+- Option 1. The property is left empty, in its original position. If the note does not have the property, it stays without it.
+- Option 2. Nothing changes.
+- Option 3. Only the source option is removed; the other options stay. If it was the only one, the property is left empty.
+
+##### Listing every option in the Group menu
+
+With Group order → Manual, Obsidian only lists in the Group menu the groups of notes the view currently shows. 
+With this plugin, in a Kanban view you can turn on **Split Groups: list all property options in the Group menu** so the menu also lists every option the property has anywhere in your vault, as hidden groups with 0 notes. 
+Then, they can be made visible as empty columns even if the view's filters leave no note with that option. The **None** group (notes without a value) is also offered even if no visible note lacks the property. Options left hidden stay hidden.
 
 ## Installation
 
